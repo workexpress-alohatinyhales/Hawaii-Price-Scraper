@@ -1,0 +1,7 @@
+playwright
+beautifulsoup4
+pandas
+google-genai
+python-dotenv
+gspread
+google-auth
