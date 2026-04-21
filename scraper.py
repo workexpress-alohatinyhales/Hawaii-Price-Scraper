@@ -158,6 +158,12 @@ def main():
         print("Could not find 'Current Price' column exactly.")
         exit(1)
         
+    try:
+        last_updated_col_index = headers.index("Last Updated") + 1
+    except ValueError:
+        print("Could not find 'Last Updated' column exactly.")
+        exit(1)
+        
     page_cache = {}
     
     with sync_playwright() as p:
@@ -184,6 +190,7 @@ def main():
             text_content = scrape_page_content(url, page_cache, page)
             if not text_content:
                 worksheet.update_cell(sheet_row_num, price_col_index, "Fetch Failed")
+                worksheet.update_cell(sheet_row_num, last_updated_col_index, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 time.sleep(2) # Google Sheets API rate limit safety
                 continue
                 
@@ -197,12 +204,14 @@ def main():
             if price == "Error":
                 print("Skipping this model due to repeated API errors.")
                 worksheet.update_cell(sheet_row_num, price_col_index, "API Error")
+                worksheet.update_cell(sheet_row_num, last_updated_col_index, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 time.sleep(2)
                 continue
                 
             # Update the specific cell dynamically
             print(f"      [Sheets] Saving price ({price}) to Google Sheets...")
             worksheet.update_cell(sheet_row_num, price_col_index, price)
+            worksheet.update_cell(sheet_row_num, last_updated_col_index, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
             print("      [Sheets] Saved successfully! Sleeping for 13s...")
             
             # Rate limit for free tier is 15 RPM, but we saw a limit of 5 for gemini sometimes
