@@ -2,6 +2,7 @@ import os
 import time
 import gspread
 import json
+import re
 from datetime import datetime
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -60,20 +61,65 @@ Website Text:
 {text}
 
 Return ONLY the price amount. For example, "$55,000". If the model name is not mentioned or the price is not available on this page, return "Not Found". DO NOT include any other text in your response.
+
+Formatting Rules:
+1. If the price uses a "k" or "K" suffix (e.g., "$199k" or "$199K"), convert it to the full number with commas (e.g., "$199,000").
+2. If the price is a range with "k" (e.g., "$199k-349k"), explicitly expand both numbers with dollars signs (e.g., "$199,000 - $349,000").
+3. Remove any "USD" currency indicators (e.g., change "$289,000 USD" to "$289,000").
 """
     
     for attempt in range(3):
         try:
+            print("      [LLM] Requesting price extraction from Gemini...")
             response = client.models.generate_content(
-                model='gemini-flash-latest',
+                model='gemini-2.5-flash-lite',
                 contents=prompt,
             )
+            print("      [LLM] Received response!")
             return response.text.strip()
         except Exception as e:
-            print(f"LLM extraction error (Attempt {attempt+1}): {e}")
+            print(f"      [LLM] Extraction error (Attempt {attempt+1}): {e}")
             time.sleep(15)
             
     return "Error"
+
+def _process_price_string(price_str):
+    if price_str in ["Error", "Not Found", "Fetch Failed"]:
+        return price_str
+        
+    def parse_num(s):
+        s = s.replace(',', '')
+        multiplier = 1
+        if s.lower().endswith('k'):
+            multiplier = 1000
+            s = s[:-1]
+        try:
+            return float(s) * multiplier
+        except ValueError:
+            return None
+
+    matches = re.findall(r'\d+(?:,\d+)*(?:\.\d+)?(?:[kK])?', price_str)
+    
+    if not matches:
+        return price_str
+        
+    if len(matches) == 1:
+        return price_str
+        
+    valid_nums = []
+    for m in matches:
+        val = parse_num(m)
+        if val is not None:
+            valid_nums.append(val)
+            
+    if not valid_nums:
+        return price_str
+        
+    avg = sum(valid_nums) / len(valid_nums)
+    if avg.is_integer():
+        return f"${int(avg):,}"
+    else:
+        return f"${avg:,.2f}"
 
 def main():
     client = init_gemini()
@@ -82,11 +128,15 @@ def main():
     client = genai.Client(api_key=api_key)
 
     service_json_string = os.environ.get("SERVICE_ACCOUNT_JSON")
-    if not service_json_string:
-        print("Error: SERVICE_ACCOUNT_JSON secret not found.")
-        return
-        
-    service_account_info = json.loads(service_json_string)
+    if service_json_string:
+        service_account_info = json.loads(service_json_string)
+    else:
+        # Fallback for local testing
+        if not os.path.exists(SERVICE_ACCOUNT_FILE):
+            print(f"Error: {SERVICE_ACCOUNT_FILE} not found locally and SERVICE_ACCOUNT_JSON env var missing.")
+            return
+        with open(SERVICE_ACCOUNT_FILE, "r") as f:
+            service_account_info = json.load(f)
 
     print("Authenticating with Google Sheets...")
     gc = gspread.service_account_from_dict(service_account_info)
@@ -140,6 +190,10 @@ def main():
             price = extract_price_with_llm(client, text_content, model_name)
             print(f"--> Extracted Price: {price}")
             
+            price = _process_price_string(price)
+            if price not in ["Error", "Not Found", "Fetch Failed", ""]:
+                print(f"--> Processed Price for Sheets: {price}")
+            
             if price == "Error":
                 print("Skipping this model due to repeated API errors.")
                 worksheet.update_cell(sheet_row_num, price_col_index, "API Error")
@@ -147,7 +201,9 @@ def main():
                 continue
                 
             # Update the specific cell dynamically
+            print(f"      [Sheets] Saving price ({price}) to Google Sheets...")
             worksheet.update_cell(sheet_row_num, price_col_index, price)
+            print("      [Sheets] Saved successfully! Sleeping for 13s...")
             
             # Rate limit for free tier is 15 RPM, but we saw a limit of 5 for gemini sometimes
             # Google Sheets API also has limits, sleep handles both.
